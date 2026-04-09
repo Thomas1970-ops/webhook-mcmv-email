@@ -1,12 +1,7 @@
 """
-Webhook de Notificações MCMV com Email + WhatsApp Link
+Webhook de Notificações MCMV com Email + WhatsApp Link (VERSÃO ASSÍNCRONA)
 Recebe dados do Supabase e envia notificação por email com link para WhatsApp
-
-Para usar:
-1. Instale dependências: pip install -r requirements.txt
-2. Configure variáveis em .env
-3. Execute: python app_email_whatsapp.py
-4. Configure webhook do Supabase apontando para: https://seu-dominio.com/webhook/novo-lead
+Otimizado com envio assíncrono de email para evitar timeouts
 """
 
 from flask import Flask, request, jsonify
@@ -17,10 +12,16 @@ import os
 from datetime import datetime
 from dotenv import load_dotenv
 import urllib.parse
+from threading import Thread
+import logging
 
 load_dotenv()
 
 app = Flask(__name__)
+
+# Configurar logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # ============================================
 # CONFIGURAÇÕES EMAIL
@@ -29,7 +30,7 @@ app = Flask(__name__)
 SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
 SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
 EMAIL_SENDER = os.getenv("EMAIL_SENDER", "abencoado.corretor1@gmail.com")
-EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD", "")  # Usar app password do Gmail
+EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD", "")
 EMAIL_RECEPTOR = os.getenv("EMAIL_RECEPTOR", "abencoado.corretor1@gmail.com")
 
 # WhatsApp
@@ -39,8 +40,8 @@ SEU_NUMERO_WHATSAPP = os.getenv("SEU_NUMERO_WHATSAPP", "5511960853857")
 # FUNÇÕES DE ENVIO
 # ============================================
 
-def enviar_email(assunto: str, corpo_html: str, destinatario: str = EMAIL_RECEPTOR):
-    """Envia email via SMTP"""
+def enviar_email_sync(assunto: str, corpo_html: str, destinatario: str = EMAIL_RECEPTOR):
+    """Envia email via SMTP (síncrono)"""
     try:
         msg = MIMEMultipart("alternative")
         msg["Subject"] = assunto
@@ -56,17 +57,28 @@ def enviar_email(assunto: str, corpo_html: str, destinatario: str = EMAIL_RECEPT
         msg.attach(parte_texto)
         msg.attach(parte_html)
         
-        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=10) as server:
             server.starttls()
             server.login(EMAIL_SENDER, EMAIL_PASSWORD)
             server.send_message(msg)
         
-        print(f"✅ Email enviado para {destinatario}")
+        logger.info(f"✅ Email enviado para {destinatario}")
         return True
         
     except Exception as e:
-        print(f"❌ Erro ao enviar email: {str(e)}")
+        logger.error(f"❌ Erro ao enviar email: {str(e)}")
         return False
+
+
+def enviar_email_async(assunto: str, corpo_html: str, destinatario: str = EMAIL_RECEPTOR):
+    """Envia email de forma assíncrona (em thread separada)"""
+    thread = Thread(
+        target=enviar_email_sync,
+        args=(assunto, corpo_html, destinatario),
+        daemon=True
+    )
+    thread.start()
+    return True
 
 
 def gerar_link_whatsapp(numero: str, mensagem: str = ""):
@@ -120,8 +132,8 @@ def formatar_email(dados: dict) -> tuple:
             .info-label {{ font-weight: bold; color: #333; }}
             .info-value {{ color: #666; }}
             .highlight {{ background-color: #fef3c7; padding: 15px; border-radius: 5px; margin: 15px 0; }}
-            .button {{ display: inline-block; background-color: #25d366; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; margin: 10px 5px 10px 0; }}
-            .button-email {{ display: inline-block; background-color: #1e3a8a; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; margin: 10px 5px 10px 0; }}
+            .button {{ display: inline-block; background-color: #25d366; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; margin: 10px 5px 10px 0; font-weight: bold; }}
+            .button-email {{ display: inline-block; background-color: #1e3a8a; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; margin: 10px 5px 10px 0; font-weight: bold; }}
             .footer {{ text-align: center; color: #999; font-size: 12px; margin-top: 20px; padding-top: 20px; border-top: 1px solid #eee; }}
         </style>
     </head>
@@ -234,18 +246,20 @@ def webhook_novo_lead():
         
         # Formatar email
         assunto, corpo_html = formatar_email(dados)
-        print(f"\n📨 Email a enviar:\n{assunto}\n")
+        logger.info(f"📨 Email a enviar: {assunto}")
         
-        # Enviar notificação
-        sucesso = enviar_email(assunto, corpo_html)
+        # Enviar notificação de forma assíncrona
+        enviar_email_async(assunto, corpo_html)
         
-        if sucesso:
-            return jsonify({"status": "sucesso", "mensagem": "Notificação enviada"}), 200
-        else:
-            return jsonify({"status": "erro", "mensagem": "Falha ao enviar notificação"}), 500
+        # Retornar sucesso imediatamente (email será enviado em background)
+        return jsonify({
+            "status": "sucesso",
+            "mensagem": "Notificação recebida e será processada",
+            "lead": dados.get("record", {}).get("nome", "N/A")
+        }), 200
             
     except Exception as e:
-        print(f"❌ Erro no webhook: {str(e)}")
+        logger.error(f"❌ Erro no webhook: {str(e)}")
         return jsonify({"status": "erro", "mensagem": str(e)}), 500
 
 
@@ -260,8 +274,8 @@ def index():
     """Página inicial"""
     return jsonify({
         "nome": "Webhook de Notificações MCMV",
-        "versao": "3.0",
-        "tipo": "Email + WhatsApp Link",
+        "versao": "3.1",
+        "tipo": "Email + WhatsApp Link (Assíncrono)",
         "endpoints": {
             "webhook": "/webhook/novo-lead (POST)",
             "health": "/health (GET)"
@@ -275,4 +289,4 @@ def index():
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
